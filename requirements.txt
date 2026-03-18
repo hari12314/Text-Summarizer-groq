@@ -1,2 +1,10 @@
-﻿groq
+groq
 streamlit
+langchain
+langchain-community
+langchain-text-splitters
+langchain-core
+faiss-cpu
+sentence-transformers
+pypdf
+pymupdf

@@ -1,291 +1,460 @@
 import streamlit as st
+import os
+import json
+import time
+import tempfile
+from collections import defaultdict
 from groq import Groq
-import json, time
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.documents import Document
 
-st.set_page_config(page_title="Text Lens", page_icon="Lens", layout="wide")
+st.set_page_config(
+    page_title="MultiMind - Multi-Doc Q&A",
+    page_icon="M",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
-:root{--bg:#0d0d0f;--surface:#16161a;--surface2:#1e1e24;--border:#2a2a35;--accent:#f0b429;--text:#e8e8f0;--muted:#6b6b80;}
-html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!important;color:var(--text)!important;font-family:'DM Sans',sans-serif!important;}
-[data-testid="stSidebar"]{background-color:var(--surface)!important;border-right:1px solid var(--border)!important;}
-.hero-title{font-family:'Playfair Display',serif;font-size:2.8rem;font-weight:900;background:linear-gradient(135deg,#f0b429,#e05a2b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-.hero-sub{color:var(--muted);font-size:1rem;margin-top:0.3rem;}
-.result-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.8rem 2rem;margin-top:1rem;position:relative;overflow:hidden;}
-.result-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#f0b429,#e05a2b);}
-.rlabel{font-family:'DM Mono',monospace;font-size:0.68rem;color:var(--accent);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:1rem;}
-.rtext{font-size:0.97rem;line-height:1.85;color:var(--text);white-space:pre-wrap;}
-.jblock{background:#0a0a0f;border:1px solid var(--border);border-radius:10px;padding:1.2rem;font-family:'DM Mono',monospace;font-size:0.82rem;line-height:1.8;color:#a78bfa;white-space:pre-wrap;}
-.chip{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:5px 13px;font-family:'DM Mono',monospace;font-size:0.73rem;color:var(--muted);display:inline-block;margin:4px 4px 0 0;}
-.chip span{color:var(--text);font-weight:600;}
-.stTextArea textarea{background-color:var(--surface2)!important;border:1px solid var(--border)!important;color:var(--text)!important;border-radius:10px!important;}
-.stTextArea textarea:focus{border-color:var(--accent)!important;}
-.stTextInput input{background-color:var(--surface2)!important;border:1px solid var(--border)!important;color:var(--text)!important;border-radius:10px!important;font-family:'DM Mono',monospace!important;}
-.stSelectbox>div>div{background-color:var(--surface2)!important;border:1px solid var(--border)!important;color:var(--text)!important;border-radius:10px!important;}
-.stButton>button{background:linear-gradient(135deg,#f0b429,#e05a2b)!important;color:#0d0d0f!important;border:none!important;border-radius:10px!important;font-weight:600!important;width:100%!important;}
-#MainMenu,footer,header{visibility:hidden;}
-.block-container{padding-top:1rem!important;}
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap');
+
+:root {
+    --bg:      #09090f;
+    --s1:      #111118;
+    --s2:      #18181f;
+    --border:  #2a2a3a;
+    --acc:     #6c63ff;
+    --acc2:    #ff6584;
+    --green:   #43e97b;
+    --yellow:  #ffd166;
+    --text:    #e8e8f5;
+    --muted:   #6b6b88;
+}
+
+html, body, [data-testid="stAppViewContainer"] {
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+}
+
+[data-testid="stSidebar"] {
+    background: var(--s1) !important;
+    border-right: 1px solid var(--border) !important;
+}
+
+.hero { padding: 2rem 0 1.5rem; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
+.hero-title {
+    font-size: 3rem; font-weight: 700; letter-spacing: -1.5px;
+    background: linear-gradient(135deg, #6c63ff 0%, #ff6584 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    line-height: 1; margin: 0;
+}
+.hero-sub { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; margin-top: 0.4rem; letter-spacing: 0.05em; }
+
+.doc-card {
+    background: var(--s2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.8rem 1rem; margin-bottom: 0.5rem;
+    display: flex; align-items: center; gap: 0.8rem;
+    font-size: 0.85rem;
+}
+.doc-card .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+.stat-card {
+    background: var(--s2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1rem; text-align: center;
+}
+.stat-num { font-size: 1.8rem; font-weight: 700; color: var(--acc); line-height: 1; }
+.stat-lbl { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.3rem; }
+
+.qa-card {
+    background: var(--s1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.4rem 1.6rem; margin-bottom: 1rem;
+}
+.qa-card.q { border-left: 3px solid var(--acc); }
+.qa-card.a { border-left: 3px solid var(--green); background: #0d1a10; }
+.qa-label { font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 0.6rem; }
+.qa-text  { font-size: 0.95rem; line-height: 1.8; color: var(--text); }
+
+.source-tag {
+    display: inline-block; padding: 3px 10px; border-radius: 20px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;
+    margin: 2px 3px 0 0; border: 1px solid;
+}
+
+.conf-high   { background: #0a2a10; color: var(--green);  border-color: #1a4a20; }
+.conf-medium { background: #2a2000; color: var(--yellow); border-color: #4a3800; }
+.conf-low    { background: #2a0a0a; color: var(--acc2);   border-color: #4a1a1a; }
+
+.chunk-preview {
+    background: #050508; border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.8rem; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem; color: var(--muted); line-height: 1.7;
+    white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+}
+
+.info-box {
+    background: var(--s2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.2rem; margin: 0.8rem 0;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--muted); line-height: 1.9;
+}
+
+.stButton > button {
+    background: linear-gradient(135deg, #6c63ff, #ff6584) !important;
+    color: white !important; border: none !important; border-radius: 8px !important;
+    font-family: 'Space Grotesk', sans-serif !important; font-weight: 600 !important;
+    width: 100% !important; letter-spacing: 0.03em !important;
+}
+
+.stTextArea textarea {
+    background: var(--s2) !important; border: 1px solid var(--border) !important;
+    color: var(--text) !important; border-radius: 10px !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+}
+.stTextArea textarea:focus { border-color: var(--acc) !important; }
+
+.stTextInput input {
+    background: var(--s2) !important; border: 1px solid var(--border) !important;
+    color: var(--text) !important; border-radius: 8px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+
+.stSelectbox > div > div {
+    background: var(--s2) !important; border: 1px solid var(--border) !important;
+    color: var(--text) !important; border-radius: 8px !important;
+}
+
+[data-testid="stSidebar"] .stTextInput input,
+[data-testid="stSidebar"] .stSelectbox > div > div {
+    background: #1a1a25 !important; border-color: #2a2a3a !important; color: var(--text) !important;
+}
+
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding-top: 1rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
-SYSTEM = "You are an expert text summarizer. Be concise, accurate, and follow the output format exactly."
+# DOC COLORS for visual distinction
+DOC_COLORS = ["#6c63ff","#ff6584","#43e97b","#ffd166","#38bdf8","#fb923c","#a78bfa","#34d399"]
 
-FMT_MAP = {
-    "Bullet Points": "bullet points — use the '.' symbol for each point, one per line",
-    "Plain Paragraph": "a single coherent paragraph",
-    "JSON": 'valid JSON only — keys: "summary"(string), "key_points"(array of strings), "word_count"(int). No markdown fences.',
-}
+@st.cache_resource(show_spinner=False)
+def load_embeddings_model():
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={"device":"cpu"})
 
-def build_prompt(text, mode, fmt, length):
-    fi = FMT_MAP[fmt]
-    length_str = str(length)
+def load_single_doc(uploaded_file):
+    suffix = ".pdf" if uploaded_file.type == "application/pdf" else ".txt"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
+    loader = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path, encoding="utf-8")
+    pages = loader.load()
+    for p in pages:
+        p.metadata["source"] = uploaded_file.name
+    os.unlink(tmp_path)
+    return pages
 
-    if mode == "Zero-Shot":
-        return (
-            "Summarize the following text in " + length_str + " sentences.\n"
-            "Output format: " + fi + "\n\n"
-            "Text:\n" + text
-        )
+def build_index(all_docs, chunk_size, chunk_overlap, embeddings):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        separators=["\n\n","\n",". "," ",""],
+    )
+    chunks = splitter.split_documents(all_docs)
+    vs = FAISS.from_documents(chunks, embeddings)
+    return vs, chunks
 
-    elif mode == "One-Shot":
-        return (
-            "Here is an example of a good summary:\n\n"
-            "INPUT: 'The Apollo 11 mission landed the first humans on the Moon in July 1969. "
-            "Neil Armstrong and Buzz Aldrin walked on the surface while Michael Collins orbited above.'\n"
-            "SUMMARY:\n"
-            ". First crewed Moon landing took place in July 1969.\n"
-            ". Neil Armstrong and Buzz Aldrin walked on the lunar surface.\n"
-            ". Michael Collins remained in orbit above.\n\n"
-            "---\n"
-            "Now summarize the following text in " + length_str + " sentences.\n"
-            "Output format: " + fi + "\n\n"
-            "Text:\n" + text
-        )
+def build_prompt(chunks, question):
+    blocks = []
+    for i, c in enumerate(chunks):
+        src  = c.metadata.get("source","Unknown")
+        page = c.metadata.get("page","")
+        pi   = (" | Page " + str(int(page)+1)) if page != "" else ""
+        blocks.append("SOURCE " + str(i+1) + ": " + src + pi + "\n" + c.page_content)
+    context = "\n\n---\n\n".join(blocks)
+    return (
+        "You are a multi-document Q&A assistant. Answer ONLY from the sources below.\n"
+        "Rules:\n"
+        "1. Use only the provided sources. No outside knowledge.\n"
+        "2. If not found, set answer to: I could not find this in the provided documents.\n"
+        "3. Cite which source(s) your answer came from.\n"
+        "4. Return valid JSON only with exactly these keys:\n"
+        "{\n"
+        "  \"answer\": \"your answer\",\n"
+        "  \"sources\": [\"file1.pdf\"],\n"
+        "  \"confidence\": \"high\" or \"medium\" or \"low\",\n"
+        "  \"found_in_documents\": true or false\n"
+        "}\n\n"
+        "SOURCES:\n\n" + context +
+        "\n\nQUESTION: " + question + "\n\nJSON:"
+    )
 
-    else:  # Few-Shot
-        return (
-            "Study these three examples of high-quality summaries:\n\n"
-            "EXAMPLE 1\n"
-            "INPUT: 'Climate change refers to long-term shifts in temperatures and weather patterns. "
-            "Human activities, particularly fossil fuel burning, have been the main driver since the 1800s.'\n"
-            "SUMMARY:\n"
-            ". Climate change means long-term shifts in temperature and weather.\n"
-            ". Human fossil fuel use since the 1800s is the primary cause.\n\n"
-            "EXAMPLE 2\n"
-            "INPUT: 'Machine learning is a subset of AI that enables systems to learn from data. "
-            "It powers applications from spam filters to self-driving cars.'\n"
-            "SUMMARY:\n"
-            ". Machine learning allows computers to learn from data automatically.\n"
-            ". It powers technologies like spam filters and autonomous vehicles.\n\n"
-            "EXAMPLE 3\n"
-            "INPUT: 'The Renaissance spanned the 14th to 17th centuries across Europe. "
-            "It emphasized humanism, art, and science, marking a shift away from medieval thinking.'\n"
-            "SUMMARY:\n"
-            ". The Renaissance was a 14th to 17th century European cultural revival.\n"
-            ". It promoted humanism, art, and science over medieval traditions.\n\n"
-            "---\n"
-            "Now summarize the following text in " + length_str + " sentences.\n"
-            "Output format: " + fi + "\n\n"
-            "Text:\n" + text
-        )
+def parse_json(raw):
+    text = raw.strip()
+    if "```" in text:
+        for part in text.split("```"):
+            part = part.strip()
+            if part.startswith("json"): part = part[4:].strip()
+            if part.startswith("{"): text = part; break
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"answer": raw, "sources": [], "confidence": "low", "found_in_documents": True}
 
-
-def call_groq(api_key, prompt, model, temperature):
+def ask(api_key, question, vectorstore, top_k, model, temperature):
+    chunks = vectorstore.similarity_search(question, k=top_k)
+    prompt = build_prompt(chunks, question)
     c = Groq(api_key=api_key)
     r = c.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user",   "content": prompt},
+            {"role":"system","content":"Precise multi-document Q&A assistant. Always return valid JSON."},
+            {"role":"user","content":prompt},
         ],
-        temperature=temperature,
-        max_tokens=800,
+        temperature=temperature, max_tokens=1000,
     )
-    return r.choices[0].message.content.strip()
+    result = parse_json(r.choices[0].message.content.strip())
+    result["chunks"] = chunks
+    return result
 
-
-def fmt_json(raw):
-    try:
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        return json.dumps(json.loads(clean.strip()), indent=2)
-    except Exception:
-        lines = [l.strip(". -").strip() for l in raw.splitlines() if l.strip()]
-        return json.dumps({
-            "summary": lines[0] if lines else raw,
-            "key_points": lines[1:],
-            "format": "auto-generated"
-        }, indent=2)
-
-
-# Sidebar
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(
-        '<div style="font-family:Playfair Display,serif;font-size:1.5rem;font-weight:900;'
-        'background:linear-gradient(135deg,#f0b429,#e05a2b);-webkit-background-clip:text;'
-        '-webkit-text-fill-color:transparent;">TextLens</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown('<div style="color:#6b6b80;font-size:0.88rem;">Groq · 100% Free · No Credit Card</div>', unsafe_allow_html=True)
+        '<div style="font-family:Space Grotesk,sans-serif;font-size:1.4rem;font-weight:700;'
+        'background:linear-gradient(135deg,#6c63ff,#ff6584);-webkit-background-clip:text;'
+        '-webkit-text-fill-color:transparent;letter-spacing:-0.5px;">MultiMind</div>',
+        unsafe_allow_html=True)
+    st.markdown('<div style="font-family:JetBrains Mono,monospace;font-size:0.72rem;color:#6b6b88;margin-bottom:1rem;">Multi-Document RAG Q&A</div>', unsafe_allow_html=True)
     st.markdown("---")
 
     st.markdown("**API Key**")
-    st.caption("Free key at: https://console.groq.com")
+    st.caption("Free at: https://console.groq.com")
     api_key = st.text_input("", type="password", placeholder="gsk_...", label_visibility="collapsed")
 
     st.markdown("**Model**")
-    model = st.selectbox("", [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
-    ], label_visibility="collapsed")
+    model = st.selectbox("", ["llama-3.3-70b-versatile","llama-3.1-8b-instant","mixtral-8x7b-32768","gemma2-9b-it"], label_visibility="collapsed")
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.05)
 
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.4, 0.05)
+    st.markdown("**Chunking**")
+    chunk_size    = st.slider("Chunk Size", 200, 1000, 400, 50)
+    chunk_overlap = st.slider("Chunk Overlap", 0, 200, 60, 10)
 
-    st.markdown("**Options**")
-    mode = st.selectbox("Prompting Mode", ["Zero-Shot", "One-Shot", "Few-Shot"])
-    output_format = st.selectbox("Output Format", ["Bullet Points", "Plain Paragraph", "JSON"])
-    summary_length = st.slider("Length (sentences)", 1, 10, 3)
+    st.markdown("**Retrieval**")
+    top_k = st.slider("Top K Chunks", 2, 8, 4)
 
     st.markdown("---")
-    model_info = {
-        "llama-3.3-70b-versatile": "Best quality · Llama 3.3 70B",
-        "llama-3.1-8b-instant":    "Fastest · Llama 3.1 8B",
-        "mixtral-8x7b-32768":      "Long text · 32K context",
-        "gemma2-9b-it":            "Google Gemma 2 · 9B",
-    }
-    mode_tips = {
-        "Zero-Shot": "Direct instruction. No examples.",
-        "One-Shot":  "1 example guides format and tone.",
-        "Few-Shot":  "3 examples for max consistency.",
-    }
-    st.info(model_info.get(model, "") + "\n\n" + mode_tips.get(mode, ""))
+    st.markdown(
+        '<div style="font-family:JetBrains Mono,monospace;font-size:0.7rem;color:#4a4a60;line-height:1.9;">'
+        'Embeddings: all-MiniLM-L6-v2<br>Vector DB: FAISS (local)<br>'
+        'Framework: LangChain<br>LLM: Groq (free)<br>Output: JSON + citations'
+        '</div>', unsafe_allow_html=True)
 
-
-# Header
+# ── HEADER ────────────────────────────────────────────────────────────────────
 st.markdown(
-    '<div style="padding:1.5rem 0 1rem;">'
-    '<h1 class="hero-title">TextLens</h1>'
-    '<p class="hero-sub">Summarize any article with Zero, One, or Few-Shot prompting · Powered by Groq (Free)</p>'
-    '</div>',
-    unsafe_allow_html=True,
-)
+    '<div class="hero"><h1 class="hero-title">MultiMind</h1>'
+    '<p class="hero-sub">MULTI-DOCUMENT RAG &nbsp;|&nbsp; CROSS-DOC RETRIEVAL &nbsp;|&nbsp; '
+    'JSON ANSWERS WITH CITATIONS</p></div>',
+    unsafe_allow_html=True)
 
-col1, col2 = st.columns(2, gap="large")
+left, right = st.columns([1,1], gap="large")
 
-with col1:
+# ── LEFT: Upload + Index ──────────────────────────────────────────────────────
+with left:
     st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.7rem;color:#f0b429;'
-        'letter-spacing:0.1em;text-transform:uppercase;">Input Text</p>',
-        unsafe_allow_html=True,
-    )
-    text = st.text_area(
-        "",
-        height=300,
-        placeholder="Paste your article, news story, or any long text here...",
-        label_visibility="collapsed",
-    )
-    wc = len(text.split()) if text.strip() else 0
-    st.markdown(
-        '<div>'
-        '<span class="chip">Words <span>' + str(wc) + '</span></span>'
-        '<span class="chip">Mode <span>' + mode + '</span></span>'
-        '<span class="chip">Format <span>' + output_format + '</span></span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("<br>", unsafe_allow_html=True)
-    go = st.button("Summarize")
+        '<p style="font-family:JetBrains Mono,monospace;font-size:0.68rem;color:#6c63ff;'
+        'text-transform:uppercase;letter-spacing:0.12em;">Step 1 — Upload Documents</p>',
+        unsafe_allow_html=True)
 
-with col2:
-    st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.7rem;color:#f0b429;'
-        'letter-spacing:0.1em;text-transform:uppercase;">Summary Output</p>',
-        unsafe_allow_html=True,
-    )
+    uploaded_files = st.file_uploader(
+        "", type=["pdf","txt"], accept_multiple_files=True,
+        label_visibility="collapsed", help="Upload multiple PDF or TXT files")
 
-    if go:
-        if not api_key:
-            st.error("Enter your Groq API key in the sidebar.")
-        elif not text.strip():
-            st.error("Paste some text to summarize.")
-        elif wc < 15:
-            st.warning("Text too short — add more content.")
-        else:
-            prompt = build_prompt(text, mode, output_format, summary_length)
-            with st.spinner("Summarizing with " + model + "..."):
-                try:
-                    t0 = time.time()
-                    raw = call_groq(api_key, prompt, model, temperature)
-                    elapsed = round(time.time() - t0, 2)
-                    result = fmt_json(raw) if output_format == "JSON" else raw
-                    st.session_state.update({
-                        "r": result,
-                        "t": elapsed,
-                        "wi": wc,
-                        "wo": len(result.split()),
-                        "fmt": output_format,
-                    })
-                except Exception as e:
-                    err = str(e)
-                    if "401" in err or "api_key" in err.lower() or "invalid" in err.lower():
-                        st.error("Invalid API key. Check your key at console.groq.com")
-                    elif "429" in err or "rate" in err.lower():
-                        st.error("Rate limit hit. Wait 10 seconds and retry.")
-                    else:
-                        st.error("Error: " + err)
+    if uploaded_files:
+        st.markdown('<p style="font-size:0.82rem;color:#6b6b88;margin:0.5rem 0;">Uploaded files:</p>', unsafe_allow_html=True)
+        for i, f in enumerate(uploaded_files):
+            color = DOC_COLORS[i % len(DOC_COLORS)]
+            size  = round(f.size/1024, 1)
+            ext   = "PDF" if f.type=="application/pdf" else "TXT"
+            st.markdown(
+                '<div class="doc-card">'
+                '<div class="dot" style="background:' + color + ';"></div>'
+                '<span style="flex:1;color:#e8e8f5;">' + f.name + '</span>'
+                '<span style="font-family:JetBrains Mono,monospace;font-size:0.7rem;color:#6b6b88;">'
+                + ext + ' &nbsp;' + str(size) + 'KB</span>'
+                '</div>',
+                unsafe_allow_html=True)
 
-    if "r" in st.session_state:
-        r   = st.session_state["r"]
-        fmt = st.session_state["fmt"]
-        body = '<div class="jblock">' + r + '</div>' if fmt == "JSON" else '<div class="rtext">' + r + '</div>'
-        st.markdown(
-            '<div class="result-box"><div class="rlabel">Output — ' + fmt + '</div>' + body + '</div>',
-            unsafe_allow_html=True,
-        )
-        wi   = st.session_state["wi"]
-        wo   = st.session_state["wo"]
-        comp = round((1 - wo / max(wi, 1)) * 100)
-        st.markdown(
-            '<div style="margin-top:.8rem;">'
-            '<span class="chip">Time <span>' + str(st.session_state["t"]) + 's</span></span>'
-            '<span class="chip">In <span>' + str(wi) + 'w</span></span>'
-            '<span class="chip">Out <span>' + str(wo) + 'w</span></span>'
-            '<span class="chip">Compressed <span>' + str(comp) + '%</span></span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        build_btn = st.button("Build Knowledge Base (" + str(len(uploaded_files)) + " files)")
+
+        if build_btn:
+            if not api_key:
+                st.error("Enter your Groq API key in the sidebar.")
+            else:
+                with st.spinner("Loading embedding model..."):
+                    emb = load_embeddings_model()
+
+                all_pages = []
+                with st.spinner("Loading " + str(len(uploaded_files)) + " documents..."):
+                    for f in uploaded_files:
+                        pages = load_single_doc(f)
+                        all_pages.extend(pages)
+
+                with st.spinner("Chunking and indexing..."):
+                    vs, chunks = build_index(all_pages, chunk_size, chunk_overlap, emb)
+
+                st.session_state["vs"]       = vs
+                st.session_state["chunks"]   = chunks
+                st.session_state["doc_names"] = [f.name for f in uploaded_files]
+                st.session_state["history"]  = []
+
+                # Count chunks per doc
+                cps = defaultdict(int)
+                for c in chunks: cps[c.metadata.get("source","?")] += 1
+                st.session_state["chunks_per_src"] = dict(cps)
+
+                st.success("Knowledge base ready! " + str(len(chunks)) + " chunks indexed.")
+
+    # Stats
+    if "vs" in st.session_state:
+        docs_count   = len(st.session_state["doc_names"])
+        chunks_count = len(st.session_state["chunks"])
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            st.markdown('<div class="stat-card"><div class="stat-num">' + str(docs_count) + '</div><div class="stat-lbl">Docs</div></div>', unsafe_allow_html=True)
+        with sc2:
+            st.markdown('<div class="stat-card"><div class="stat-num">' + str(chunks_count) + '</div><div class="stat-lbl">Chunks</div></div>', unsafe_allow_html=True)
+        with sc3:
+            st.markdown('<div class="stat-card"><div class="stat-num">' + str(top_k) + '</div><div class="stat-lbl">Top-K</div></div>', unsafe_allow_html=True)
+
         st.markdown("<br>", unsafe_allow_html=True)
-        ext = "json" if fmt == "JSON" else "txt"
-        st.download_button(
-            "Download Summary",
-            r,
-            file_name="summary." + ext,
-            mime="application/json" if fmt == "JSON" else "text/plain",
-        )
+        st.markdown('<p style="font-family:JetBrains Mono,monospace;font-size:0.68rem;color:#6c63ff;text-transform:uppercase;letter-spacing:0.1em;">Chunks per document</p>', unsafe_allow_html=True)
+        cps = st.session_state.get("chunks_per_src", {})
+        for i, (src, cnt) in enumerate(cps.items()):
+            color = DOC_COLORS[i % len(DOC_COLORS)]
+            st.markdown(
+                '<div class="doc-card">'
+                '<div class="dot" style="background:' + color + '"></div>'
+                '<span style="flex:1;font-size:0.82rem;color:#e8e8f5;">' + src + '</span>'
+                '<span style="font-family:JetBrains Mono,monospace;font-size:0.72rem;color:#6b6b88;">'
+                + str(cnt) + ' chunks</span></div>',
+                unsafe_allow_html=True)
+
+        # Chunk inspector
+        with st.expander("Inspect Sample Chunks"):
+            shown = {}
+            for chunk in st.session_state["chunks"]:
+                src = chunk.metadata.get("source","?")
+                if src not in shown:
+                    shown[src] = chunk
+                if len(shown) >= 3: break
+            for src, chunk in shown.items():
+                st.markdown("**" + src + "** (" + str(len(chunk.page_content)) + " chars)")
+                st.markdown('<div class="chunk-preview">' + chunk.page_content[:300] + "...</div>", unsafe_allow_html=True)
     else:
         st.markdown(
-            '<div class="result-box" style="min-height:280px;display:flex;align-items:center;'
-            'justify-content:center;flex-direction:column;color:#2a2a35;">'
-            '<div style="font-size:2.5rem;">*</div>'
-            '<div style="font-family:DM Mono,monospace;font-size:0.75rem;letter-spacing:0.1em;margin-top:.6rem;">'
-            'SUMMARY WILL APPEAR HERE</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+            '<div class="info-box" style="text-align:center;padding:2.5rem;">'
+            'Upload multiple PDF or TXT files above<br>'
+            '<span style="font-size:0.72rem;opacity:0.5;">then click Build Knowledge Base</span>'
+            '</div>', unsafe_allow_html=True)
 
-# Prompt Inspector
-if text.strip():
-    with st.expander("Inspect Prompt Sent to Model"):
-        preview = build_prompt(
-            text[:300] + ("..." if len(text) > 300 else ""),
-            mode,
-            output_format,
-            summary_length,
-        )
-        st.code(preview, language="text")
+# ── RIGHT: Q&A ────────────────────────────────────────────────────────────────
+with right:
+    st.markdown(
+        '<p style="font-family:JetBrains Mono,monospace;font-size:0.68rem;color:#6c63ff;'
+        'text-transform:uppercase;letter-spacing:0.12em;">Step 2 — Ask Questions</p>',
+        unsafe_allow_html=True)
+
+    if "vs" not in st.session_state:
+        st.markdown(
+            '<div class="info-box" style="text-align:center;padding:3rem;min-height:300px;">'
+            'Build the knowledge base first<br>'
+            '<span style="font-size:0.72rem;opacity:0.5;">Upload documents on the left</span>'
+            '</div>', unsafe_allow_html=True)
+    else:
+        question = st.text_area("", height=90, placeholder="Ask anything across your documents...", label_visibility="collapsed")
+        ask_btn  = st.button("Ask Question")
+
+        if ask_btn:
+            if not question.strip():
+                st.warning("Type a question.")
+            elif not api_key:
+                st.error("Enter your Groq API key.")
+            else:
+                with st.spinner("Searching across " + str(len(st.session_state["doc_names"])) + " documents..."):
+                    try:
+                        t0 = time.time()
+                        result = ask(api_key, question, st.session_state["vs"], top_k, model, temperature)
+                        elapsed = round(time.time()-t0, 2)
+                        result["time"] = elapsed
+                        result["question"] = question
+                        st.session_state["history"].insert(0, result)
+                    except Exception as e:
+                        err = str(e)
+                        if "401" in err or "invalid" in err.lower():
+                            st.error("Invalid API key.")
+                        elif "429" in err or "rate" in err.lower():
+                            st.error("Rate limit hit. Wait a moment.")
+                        else:
+                            st.error("Error: " + err)
+
+        # History
+        if "history" in st.session_state and st.session_state["history"]:
+            for item in st.session_state["history"]:
+                # Question
+                st.markdown(
+                    '<div class="qa-card q"><div class="qa-label">Question</div>'
+                    '<div class="qa-text">' + item["question"] + '</div></div>',
+                    unsafe_allow_html=True)
+
+                # Answer
+                st.markdown(
+                    '<div class="qa-card a"><div class="qa-label">Answer</div>'
+                    '<div class="qa-text">' + item.get("answer","") + '</div></div>',
+                    unsafe_allow_html=True)
+
+                # Meta row
+                conf  = item.get("confidence","low")
+                found = item.get("found_in_documents", True)
+                srcs  = item.get("sources", [])
+                conf_class = "conf-" + conf
+
+                src_tags = ""
+                for i, s in enumerate(srcs):
+                    color = DOC_COLORS[
+                        st.session_state["doc_names"].index(s)
+                        if s in st.session_state["doc_names"] else i
+                    ] if srcs else "#6c63ff"
+                    src_tags += (
+                        '<span class="source-tag" style="background:' + color + '22;'
+                        'color:' + color + ';border-color:' + color + '44;">' + s + '</span>'
+                    )
+
+                st.markdown(
+                    '<div style="margin:0.4rem 0 0.8rem;display:flex;flex-wrap:wrap;align-items:center;gap:6px;">'
+                    '<span class="source-tag ' + conf_class + '">Confidence: ' + conf + '</span>'
+                    '<span style="font-family:JetBrains Mono,monospace;font-size:0.7rem;color:#6b6b88;">'
+                    + str(item.get("time","")) + 's</span>'
+                    + src_tags + '</div>',
+                    unsafe_allow_html=True)
+
+                # Chunks inspector
+                with st.expander("View Retrieved Chunks"):
+                    for j, chunk in enumerate(item.get("chunks",[])):
+                        src  = chunk.metadata.get("source","?")
+                        page = chunk.metadata.get("page","")
+                        pi   = " | Page " + str(int(page)+1) if page != "" else ""
+                        st.markdown("**Chunk " + str(j+1) + "** — " + src + pi)
+                        st.markdown('<div class="chunk-preview">' + chunk.page_content + '</div>', unsafe_allow_html=True)
+
+                st.markdown("---")
+
+            if st.button("Clear History"):
+                st.session_state["history"] = []
+                st.rerun()
+        else:
+            st.markdown(
+                '<div class="info-box" style="text-align:center;min-height:200px;padding:2.5rem;">'
+                'Your answers will appear here<br>'
+                '<span style="font-size:0.72rem;opacity:0.5;">with source citations and confidence scores</span>'
+                '</div>', unsafe_allow_html=True)
